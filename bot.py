@@ -1,7 +1,7 @@
 import logging
 from config import BOT_TOKEN, API_ID, API_HASH, ADMINS, CHANNELS, DATABASE_URL
 from pyrogram import Client
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler
 from pymongo import MongoClient
 import asyncio
@@ -29,8 +29,8 @@ requests_col = db["requests"]
 pyro_client = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # Constants
-WELCOME_IMAGE_URL = "https://example.com/welcome.jpg"  # Replace with your image URL
-WELCOME_CAPTION = "🎉 Well done! You've requested to join all channels. Welcome aboard!"
+FORCE_SUB_IMAGE = "https://img.freepik.com/free-vector/flat-join-now-concept-illustration_114360-7570.jpg"  # Replace with your image
+WELCOME_IMAGE = "https://img.freepik.com/free-vector/hand-drawn-colorful-welcome-background_23-2149071306.jpg"  # Replace with your image
 
 def generate_token(length=16):
     """Generate random token for file sharing"""
@@ -77,7 +77,7 @@ class Bot:
         # Check force subscribe
         not_requested = await self.check_join_requests(user.id)
         if not_requested:
-            await self.send_join_request_links(update, user.id, not_requested)
+            await self.send_force_sub_message(update, user.id, not_requested)
             return
         
         # If all channels requested
@@ -87,9 +87,57 @@ class Bot:
         """Send welcome image with caption"""
         await self.app.bot.send_photo(
             chat_id=chat_id,
-            photo=WELCOME_IMAGE_URL,
-            caption=WELCOME_CAPTION
+            photo=WELCOME_IMAGE,
+            caption="🎉 Welcome! You've successfully requested to join all required channels.\n\n"
+                   "Now you can enjoy full access to all bot features!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌟 Start Exploring", callback_data="start_exploring")]
+            ])
         )
+    
+    async def send_force_sub_message(self, update: Update, user_id: int, channels: List[int]):
+        """Send force subscription message with image and buttons"""
+        channel_links = []
+        for channel in channels:
+            try:
+                channel_info = await pyro_client.get_chat(channel)
+                invite_link = await pyro_client.create_chat_invite_link(
+                    channel,
+                    creates_join_request=True
+                )
+                channel_links.append(f"👉 [{channel_info.title}]({invite_link.invite_link})")
+            except Exception as e:
+                logger.error(f"Error creating join request link: {e}")
+                continue
+        
+        if not channel_links:
+            await update.message.reply_text("Error generating join request links. Please try again later.")
+            return
+        
+        # Create the message with image and caption
+        caption = (
+            "🚀 **Request to Join Our Channels**\n\n"
+            "To continue using this bot, please request to join these channels:\n\n"
+            + "\n".join(channel_links) + "\n\n"
+            "After requesting, click the button below to verify:"
+        )
+        
+        buttons = [
+            [InlineKeyboardButton("📢 REQUEST TO JOIN CHANNELS", callback_data="check_requests")],
+            [InlineKeyboardButton("✅ I've Requested Access", callback_data="check_requests")]
+        ]
+        
+        # Send photo with caption and buttons
+        message = await self.app.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=FORCE_SUB_IMAGE,
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="Markdown"
+        )
+        
+        # Store message ID for later deletion
+        context.user_data["force_sub_message_id"] = message.message_id
     
     async def register_user(self, user):
         """Register user in database"""
@@ -112,43 +160,6 @@ class Bot:
                 not_requested.append(channel)
         return not_requested
     
-    async def send_join_request_links(self, update: Update, user_id: int, channels: List[int]):
-        """Send join request links to user"""
-        buttons = []
-        for channel in channels:
-            try:
-                channel_info = await pyro_client.get_chat(channel)
-                invite_link = await pyro_client.create_chat_invite_link(
-                    channel,
-                    creates_join_request=True
-                )
-                
-                buttons.append([InlineKeyboardButton(
-                    f"Request to Join {channel_info.title}",
-                    url=invite_link.invite_link
-                )])
-            except Exception as e:
-                logger.error(f"Error creating join request link: {e}")
-                continue
-        
-        if not buttons:
-            await update.message.reply_text("Error generating join request links. Please try again later.")
-            return
-        
-        buttons.append([InlineKeyboardButton("✅ I've Requested", callback_data="check_requests")])
-        
-        # Store the message ID for later deletion
-        message = await update.message.reply_text(
-            "📢 Please request to join these channels:\n\n"
-            "1. Click the buttons below to send join request\n"
-            "2. Then click 'I've Requested' to verify\n\n"
-            "You'll get access once you've requested to join all channels.",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        
-        # Store message ID for later deletion
-        context.user_data["force_sub_message_id"] = message.message_id
-    
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
@@ -156,10 +167,7 @@ class Bot:
         if query.data == "check_requests":
             not_requested = await self.check_join_requests(query.from_user.id)
             if not_requested:
-                await query.edit_message_text(
-                    "❌ You haven't requested to join all channels yet!",
-                    reply_markup=query.message.reply_markup
-                )
+                await query.answer("You haven't requested to join all channels yet!", show_alert=True)
             else:
                 # Record all requests
                 for channel in CHANNELS:
@@ -171,46 +179,60 @@ class Bot:
                 
                 # Delete the force sub message
                 try:
-                    await query.delete_message()
+                    if "force_sub_message_id" in context.user_data:
+                        await self.app.bot.delete_message(
+                            chat_id=query.message.chat_id,
+                            message_id=context.user_data["force_sub_message_id"]
+                        )
                 except Exception as e:
                     logger.error(f"Error deleting message: {e}")
                 
                 # Send welcome message
                 await self.send_welcome_message(query.message.chat_id)
+        
+        elif query.data == "start_exploring":
+            await query.edit_message_caption(
+                caption="🛠️ Here's what you can do:\n\n"
+                      "• Upload files with /upload\n"
+                      "• Browse content with /explore\n"
+                      "• Get help with /help",
+                reply_markup=None
+            )
     
     async def handle_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        message = update.effective_message
         
         # Check force subscribe
-        not_joined = await self.check_subscribed(user.id)
-        if not_joined:
-            await self.send_join_links(update, user.id, not_joined)
+        not_requested = await self.check_join_requests(user.id)
+        if not_requested:
+            await self.send_force_sub_message(update, user.id, not_requested)
             return
         
-        # Process file
+        # Process the file
         file = None
         file_type = None
         
-        if message.document:
-            file = message.document
+        if update.message.document:
+            file = update.message.document
             file_type = "document"
-        elif message.video:
-            file = message.video
+        elif update.message.video:
+            file = update.message.video
             file_type = "video"
-        elif message.photo:
-            file = message.photo[-1]  # Highest resolution
+        elif update.message.photo:
+            file = update.message.photo[-1]
             file_type = "photo"
-        elif message.audio:
-            file = message.audio
+        elif update.message.audio:
+            file = update.message.audio
             file_type = "audio"
         
         if not file:
-            await message.reply_text("Unsupported file type.")
+            await update.message.reply_text("Unsupported file type.")
             return
         
-        # Store file
+        # Generate unique token
         file_token = generate_token()
+        
+        # Store file data
         file_data = {
             "file_id": file.file_id,
             "file_unique_id": file.file_unique_id,
@@ -218,7 +240,7 @@ class Bot:
             "file_name": getattr(file, "file_name", None),
             "file_size": getattr(file, "file_size", None),
             "mime_type": getattr(file, "mime_type", None),
-            "caption": message.caption,
+            "caption": update.message.caption,
             "user_id": user.id,
             "timestamp": datetime.now(),
             "token": file_token,
@@ -230,10 +252,13 @@ class Bot:
         bot_username = (await self.app.bot.get_me()).username
         share_link = f"https://t.me/{bot_username}?start=file_{file_token}"
         
-        await message.reply_text(
-            f"📁 File stored!\n\n"
+        await update.message.reply_text(
+            f"📁 File stored successfully!\n\n"
             f"🔗 Share this link:\n{share_link}\n\n"
-            "Recipients will need to join channels before accessing."
+            "Recipients will need to request to join channels before accessing.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📤 Share File", url=f"tg://share?url={share_link}")]
+            ])
         )
     
     async def handle_file_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user, file_token):
@@ -241,15 +266,15 @@ class Bot:
         await self.register_user(user)
         
         # Check force subscribe
-        not_joined = await self.check_subscribed(user.id)
-        if not_joined:
-            await self.send_join_links(update, user.id, not_joined)
+        not_requested = await self.check_join_requests(user.id)
+        if not_requested:
+            await self.send_force_sub_message(update, user.id, not_requested)
             return
         
         # Send the file
         file_data = files_col.find_one({"token": file_token})
         if not file_data:
-            await update.message.reply_text("File not found.")
+            await update.message.reply_text("File not found or may have been deleted.")
             return
         
         # Update access count
@@ -258,8 +283,13 @@ class Bot:
             {"$inc": {"access_count": 1}}
         )
         
-        # Send file based on type
-        file_kwargs = {"caption": file_data.get("caption")}
+        # Send based on file type
+        file_kwargs = {
+            "caption": file_data.get("caption", "Here's your requested file!"),
+            "reply_markup": InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Get Shareable Link", callback_data=f"share_{file_token}")]
+            ])
+        }
         
         if file_data["file_type"] == "document":
             await update.message.reply_document(file_data["file_id"], **file_kwargs)
@@ -278,24 +308,22 @@ class Bot:
         
         total_users = users_col.count_documents({})
         total_files = files_col.count_documents({})
-        total_completed = requests_col.count_documents({"status": "completed"})
+        total_completed = requests_col.count_documents({"status": "requested"})
         
         text = (
             "📊 Bot Status:\n\n"
-            f"👤 Users: {total_users}\n"
-            f"📂 Files: {total_files}\n"
-            f"✅ Completed Subs: {total_completed}"
+            f"👤 Total Users: {total_users}\n"
+            f"📂 Total Files: {total_files}\n"
+            f"✅ Completed Requests: {total_completed}"
         )
         await update.message.reply_text(text)
     
     async def batch(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Batch upload files"""
         if update.effective_user.id not in ADMINS:
             await update.message.reply_text("🚫 Admin only command.")
             return
         
-        # Implementation would go here
-        await update.message.reply_text("Batch upload processing...")
+        await update.message.reply_text("Batch processing command placeholder")
     
     async def total_requests(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in ADMINS:
@@ -303,13 +331,13 @@ class Bot:
             return
         
         total = requests_col.count_documents({})
-        pending = requests_col.count_documents({"status": "pending"})
-        completed = requests_col.count_documents({"status": "completed"})
+        pending = requests_col.count_documents({"status": {"$exists": False}})
+        completed = requests_col.count_documents({"status": "requested"})
         
         text = (
-            "📝 Join Requests:\n\n"
-            f"📥 Total: {total}\n"
-            f"🔄 Pending: {pending}\n"
+            "📝 Join Requests Statistics:\n\n"
+            f"📥 Total Requests: {total}\n"
+            f"🔄 Pending Approval: {pending}\n"
             f"✅ Completed: {completed}"
         )
         await update.message.reply_text(text)
