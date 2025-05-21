@@ -29,8 +29,8 @@ requests_col = db["requests"]
 pyro_client = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # Constants
-FORCE_SUB_IMAGE = "https://img.freepik.com/free-vector/flat-join-now-concept-illustration_114360-7570.jpg"  # Replace with your image
-WELCOME_IMAGE = "https://img.freepik.com/free-vector/hand-drawn-colorful-welcome-background_23-2149071306.jpg"  # Replace with your image
+FORCE_SUB_IMAGE = "https://envs.sh/gCL.jpg"  # Replace with your image
+WELCOME_IMAGE = "https://envs.sh/gCL.jpg"  # Replace with your image
 
 def generate_token(length=16):
     """Generate random token for file sharing"""
